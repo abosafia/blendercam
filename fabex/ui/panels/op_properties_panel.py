@@ -104,11 +104,16 @@ class CAM_OPERATION_PROPERTIES_Panel(CAMParentPanel, Panel):
         if self.op.strategy in ["WATERLINE"]:
             col = box.column(align=True)
             if self.op.optimisation.use_opencamlib:
-                box = col.box()
-                box.alert = True
-                box.label(text="Ocl Doesn't Support Fill Areas", icon="ERROR")
                 # ocl waterline also takes skin into account
                 col.prop(self.op, "skin")
+                row = col.row()
+                row.use_property_split = False
+                row.prop(self.op, "waterline_fill", text="Fill Between Slices")
+                if self.op.waterline_fill:
+                    box = col.box()
+                    sub = box.column(align=True)
+                    sub.label(text="Toolpath")
+                    sub.prop(self.op, "distance_between_paths", text="Stepover")
             else:
                 col.prop(self.op, "slice_detail", text="Slice Detail")
                 col.prop(self.op, "skin")

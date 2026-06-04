@@ -1,3 +1,8 @@
+from math import sqrt
+
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+
 try:
     import ocl
 except ImportError:
@@ -12,9 +17,11 @@ from ..constants import (
 )
 from .async_utils import progress_async
 from ..chunk_builder import CamPathChunk
-from .chunk_utils import sort_chunks
+from .chunk_utils import limit_chunks, sort_chunks
 from .logging_utils import log
 from .ocl_utils import get_oclSTL
+from .parent_utils import parent_child_distance
+from .shapely_utils import shapely_to_chunks
 
 
 def oclWaterlineLayerHeights(operation):
@@ -96,6 +103,9 @@ async def oclGetWaterline(operation, chunks):
     waterline.setSampling(0.1)  # TODO: add sampling setting to UI
     last_pos = [0, 0, 0]
 
+    do_fill = getattr(operation, "waterline_fill", False)
+    last_slice = Polygon()
+
     for count, height in enumerate(layers):
         layer_chunks = []
         await progress_async("Waterline", int((100 * count) / len(layers)))
@@ -104,6 +114,7 @@ async def oclGetWaterline(operation, chunks):
         waterline.run2()
         wl_loops = waterline.getLoops()
 
+        layer_polys = []
         for l in wl_loops:
             inpoints = []
 
@@ -114,8 +125,80 @@ async def oclGetWaterline(operation, chunks):
             chunk = CamPathChunk(inpoints=inpoints)
             chunk.closed = True
             layer_chunks.append(chunk)
+
+            if do_fill:
+                pts2d = [(pt[0], pt[1]) for pt in inpoints]
+                if len(pts2d) >= 4:
+                    try:
+                        poly = Polygon(pts2d)
+                        if poly.is_valid:
+                            layer_polys.append(poly)
+                    except Exception:
+                        pass
+
+        if do_fill:
+            current_poly = (
+                unary_union([p.buffer(0) for p in layer_polys]) if layer_polys else Polygon()
+            )
+            last_fill = layer_chunks
+
+            # Fill between slices: clear the flat area newly exposed at this Z
+            # Layers iterate top-down so current_poly grows as Z decreases
+            if not last_slice.is_empty:
+                if getattr(operation, "inverse", False):
+                    restpoly = last_slice.difference(current_poly)
+                else:
+                    restpoly = current_poly.difference(last_slice)
+                last_fill = await _fill_polygon(
+                    restpoly, height, operation, layer_chunks, last_fill
+                )
+
+            # Ambient fill: clear stock area outside the model at this Z
+            ambient = getattr(operation, "ambient", None)
+            if ambient is not None:
+                if getattr(operation, "inverse", False) and current_poly.is_empty:
+                    restpoly = ambient.difference(last_slice)
+                else:
+                    restpoly = ambient.difference(current_poly)
+                last_fill = await _fill_polygon(
+                    restpoly, height, operation, layer_chunks, last_fill
+                )
+
+            last_slice = current_poly
+
         # sort chunks so that ordering is stable
         chunks.extend(await sort_chunks(layer_chunks, operation, last_pos=last_pos))
 
         if len(chunks) > 0:
             last_pos = chunks[-1].get_point(-1)
+
+
+async def _fill_polygon(restpoly, z, operation, layer_chunks, last_fill):
+    """Fill a polygon area with concentric inward-offset passes."""
+    restpoly = restpoly.buffer(
+        -operation.distance_between_paths,
+        resolution=operation.optimisation.circle_detail,
+    )
+    i = 0
+    if not restpoly.is_empty:
+        max_iters = max(
+            100,
+            int(sqrt(max(restpoly.area, 0)) / operation.distance_between_paths) + 500,
+        )
+    else:
+        max_iters = 0
+
+    while not restpoly.is_empty and i < max_iters:
+        if i % 50 == 0:
+            await progress_async("Waterline Fill", i)
+        nchunks = shapely_to_chunks(restpoly, z)
+        nchunks = limit_chunks(nchunks, operation, force=True)
+        layer_chunks.extend(nchunks)
+        parent_child_distance(last_fill, nchunks, operation)
+        last_fill = nchunks
+        restpoly = restpoly.buffer(
+            -operation.distance_between_paths,
+            resolution=operation.optimisation.circle_detail,
+        )
+        i += 1
+    return last_fill
