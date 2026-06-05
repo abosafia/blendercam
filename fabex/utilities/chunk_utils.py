@@ -1136,7 +1136,9 @@ async def sort_chunks(chunks, o, last_pos=None):
             stall_count = 0
         else:
             stall_count += 1
-            if stall_count >= len(chunks_remaining):  # full pass with no progress — avoid infinite loop
+            if stall_count >= len(
+                chunks_remaining
+            ):  # full pass with no progress — avoid infinite loop
                 log.warning(
                     f"sort_chunks: {len(chunks_remaining)} chunks could not be sorted, appending as-is"
                 )
